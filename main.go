@@ -47,7 +47,7 @@ func (c *ClientLimiter) Acquire() error {
 	}
 }
 
-func (c *ClientLimiter) Unacquire() {
+func (c *ClientLimiter) release() {
 	atomic.AddInt32(&c.clientCount, -1)
 }
 
@@ -85,6 +85,16 @@ type Handler struct {
 }
 
 func (h *Handler) onRequest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		w.WriteHeader(400)
+
+		jsonResponse(w, map[string]interface{}{
+			"success": false,
+			"reason":  "Method not supported",
+		})
+		return
+	}
+
 	if err := h.limiter.Acquire(); err != nil {
 		w.WriteHeader(503)
 
@@ -94,7 +104,7 @@ func (h *Handler) onRequest(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	defer h.limiter.Unacquire()
+	defer h.limiter.release()
 
 	urls, err := readRequest(r.Body)
 	if err != nil {
@@ -144,6 +154,15 @@ func downloadUrl(ctx context.Context, client *http.Client, url string) ([]byte, 
 	resp, err := client.Do(request)
 	if err != nil {
 		return nil, err
+	}
+
+	if !(resp.StatusCode >= 200 && resp.StatusCode < 300) {
+		errorData, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("status code: %d", resp.StatusCode)
+		}
+
+		return nil, fmt.Errorf("status code: %d (%s)", resp.StatusCode, string(errorData))
 	}
 
 	ret, err := ioutil.ReadAll(resp.Body)
