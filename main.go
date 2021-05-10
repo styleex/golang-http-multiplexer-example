@@ -8,6 +8,8 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"sync/atomic"
 	"time"
 )
@@ -135,7 +137,7 @@ func (h *Handler) onRequest(w http.ResponseWriter, r *http.Request) {
 
 	jsonResponse(w, map[string]interface{}{
 		"success": true,
-		"result": ret,
+		"result":  ret,
 	})
 }
 
@@ -194,16 +196,22 @@ func downloadUrls(ctx context.Context, client *http.Client, urls []string) ([]Ta
 		go worker(tasks, results)
 	}
 
+	done := ctx.Done()
 	ret := make([]TaskResult, 0, len(urls))
 	for i := 0; i < len(urls); i++ {
-		result := <-results
+		select {
+		case result := <-results:
+			if result.Err != nil {
+				cancelRequests()
+				return nil, fmt.Errorf("failed to download Url \"%s\": %s", result.Url, result.Err)
+			}
 
-		if result.Err != nil {
+			ret = append(ret, result)
+
+		case <-done:
 			cancelRequests()
-			return nil, fmt.Errorf("failed to download Url \"%s\": %s", result.Url, result.Err)
+			return nil, fmt.Errorf("request cancelled")
 		}
-
-		ret = append(ret, result)
 	}
 
 	return ret, nil
@@ -216,9 +224,29 @@ func main() {
 			Timeout: 1 * time.Second,
 		},
 	}
-
 	http.HandleFunc("/", h.onRequest)
 
+	srv := &http.Server{
+		Addr:    ":8080",
+		Handler: http.DefaultServeMux,
+	}
+
+	idleConnsClosed := make(chan struct{})
+	go func() {
+		sigint := make(chan os.Signal, 1)
+		signal.Notify(sigint, os.Interrupt)
+		<-sigint
+
+		if err := srv.Shutdown(context.Background()); err != nil {
+			log.Printf("HTTP server Shutdown: %v", err)
+		}
+		close(idleConnsClosed)
+	}()
+
 	log.Println("Listen on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+		log.Fatalf("HTTP server ListenAndServe: %v", err)
+	}
+
+	<-idleConnsClosed
 }
